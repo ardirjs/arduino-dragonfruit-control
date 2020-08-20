@@ -36,7 +36,7 @@ int cFilterBuffer[adcFilterSample];
 int vFilterBuffer[adcFilterSample];
 
 float current, voltage;
-float cAdcCalibration = 1;
+float cAdcCalibration = 1.7949;
 float vAdcCalibration = 311.76;
 
 struct x {int hor, min;} t;
