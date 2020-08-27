@@ -4,8 +4,8 @@
 #include <SoftwareSerial.h>
 
 #define baudrate 9600
-#define debugMode true
-#define debugModeSim false
+#define debugMode 0
+#define debugModeSim 0
 
 #define pinSimRs 11
 #define pinSimRx 12
@@ -27,17 +27,19 @@
 #define adcVref 5.0
 #define adcDelay 100
 #define adcScale 1023.0
-#define adcFilterSample 15
+#define adcFilterSample 16
 #define adcSampleCounter 200
 
 int statusIndicator = 0;
-boolean runningSwitching = false;
 int cFilterBuffer[adcFilterSample];
 int vFilterBuffer[adcFilterSample];
+int minCurrent = 0, maxCurrent = 30;
+int minVoltage = 195, maxVoltage = 230;
+boolean runningSwitching = false;
 
 float current, voltage;
 float cAdcCalibration = 1.7949;
-float vAdcCalibration = 311.76;
+float vAdcCalibration = 298.5074;
 
 struct x {int hor, min;} t;
 struct y {int lmp, hon, hof, mon, mof;} a, b;
@@ -61,6 +63,9 @@ void pinInitialize(void) {
 
   for (int i = 0; i < numPins; i++) {
     pinMode(pins[i], i < (numPins - 2) ? 1 : 0);
+    digitalWrite(pinLedStandby, 1);
+    digitalWrite(pinLedSending, 1);
+    digitalWrite(pinLedNetwork, 1);
   }
 }
 
@@ -76,17 +81,9 @@ void timerInitialize(void) {
 }
 
 void ledIndicator(int pins) {
-  static int counter = 0, state = 500;
-  counter = counter + 1;
-  if (counter < state / 2) {
-    digitalWrite(pinLedStandby, pins == pinLedStandby ? 1 : 0);
-    digitalWrite(pinLedSending, pins == pinLedSending ? 1 : 0);
-    digitalWrite(pinLedNetwork, pins == pinLedNetwork ? 1 : 0);
-  } else {
-    digitalWrite(pinLedSending, 0);
-    digitalWrite(pinLedNetwork, 0);
-    counter = counter > state ? 0 : counter;
-  }
+  digitalWrite(pinLedStandby, pins == pinLedStandby ? 1 : 0);
+  digitalWrite(pinLedSending, pins == pinLedSending ? 1 : 0);
+  digitalWrite(pinLedNetwork, pins == pinLedNetwork ? 1 : 0);
 }
 
 void readingSensorValue(void) {
@@ -166,8 +163,39 @@ void readingSensorValue(void) {
   Serial.print("vAdcMax: " + (String)vAdcMax + " vValue: " + (String)vValue + " \n");
   #endif
 
-  current = cValue;
-  voltage = cValue;
+  current = cValue < minCurrent ? minCurrent : cValue > maxCurrent ? maxCurrent : cValue;
+  voltage = vValue < minVoltage ? minVoltage : vValue > maxVoltage ? maxVoltage : vValue;
+}
+
+void turningOnOffControl(void) {
+  if (runningSwitching) {
+    if (!a.hon && !a.hof && !a.mon && !a.mof && !b.hon && !b.hof && !b.mon && !b.mof) {
+      // manual mode
+      digitalWrite(pinSwitchA, a.lmp);
+      digitalWrite(pinSwitchB, b.lmp);
+    } else {
+      // schedule mode
+      if (a.hon || a.hof || a.mon || a.mof) {
+        if (((a.hon * 60) + a.mon) < ((a.hof * 60) + a.mof)) {
+          digitalWrite(pinSwitchA, (((t.hor * 60) + t.min) > ((a.hon * 60) + a.mon) && \
+          ((t.hor * 60) + t.min) < ((a.hof * 60) + a.mof)) ? 1 : 0);
+        } else {
+          digitalWrite(pinSwitchA, (((t.hor * 60) + t.min) < ((a.hon * 60) + a.mon) && \
+          ((t.hor * 60) + t.min) > ((a.hof * 60) + a.mof)) ? 0 : 1);
+        }
+      }
+
+      if (b.hon || b.hof || b.mon || b.mof) {
+        if (((b.hon * 60) + b.mon) < ((b.hof * 60) + b.mof)) {
+          digitalWrite(pinSwitchB, (((t.hor * 60) + t.min) > ((b.hon * 60) + b.mon) && \
+          ((t.hor * 60) + t.min) < ((b.hof * 60) + b.mof)) ? 1 : 0);
+        } else {
+          digitalWrite(pinSwitchB, (((t.hor * 60) + t.min) < ((b.hon * 60) + b.mon) && \
+          ((t.hor * 60) + t.min) > ((b.hof * 60) + b.mof)) ? 0 : 1);
+        }
+      }
+    }
+  }
 }
 
 void simIsInitalize(void) {
@@ -183,7 +211,7 @@ void simIsInitalize(void) {
 void simIsReset(void) {
   for (int i = 0; i < 3; i++) {
     digitalWrite(pinSimRs, !(i % 2));
-    delay(250);
+    delay(100);
   }
 }
 
@@ -191,21 +219,23 @@ void simIsConnect(void) {
   simIsReset();
   while (!sim->isReady());
   while (!sim->getSignal());
-  statusIndicator = pinLedNetwork;
+  ledIndicator(pinLedNetwork);
   while (!sim->getRegistrationStatus());
   while (!sim->setupGPRS(apn));
   while (!sim->connectGPRS());
-  statusIndicator = pinLedSending;
+  ledIndicator(pinLedSending);
 }
 
 void simIsProcessed(void) {
-  statusIndicator = pinLedStandby;
+  ledIndicator(pinLedStandby);
   readingSensorValue();
+  simIsConnect();
   int v = voltage;
   char url[simBuffer], packet[simBuffer], d[simBuffer / 5];
   dtostrf(current, 4, 2, d);
   String jsonObject, urlpath = (String)host;
-  urlpath += (String)la + (String)1 + (String)lb + (String)2;
+  urlpath += (String)deviceId;
+  urlpath += (String)la + (String)a.lmp + (String)lb + (String)b.lmp;
   urlpath += (String)vv + (String)v + (String)va + (String)d;
   urlpath.toCharArray(url, simBuffer);
 
@@ -213,12 +243,10 @@ void simIsProcessed(void) {
   Serial.println(url);
   #endif
 
-  //simIsConnect();
   if (sim->doGet(url, simTimeout) == simSuccess) {
     jsonObject = sim->getDataReceived();
   }
-
-  jsonObject = "{a:[1,22,3,22,14],b:[1,0,0,0,0],t:[2,23]}";
+  // jsonObject = "{a:[1,22,3,22,14],b:[1,0,0,0,0],t:[2,23]}";
 
   if (jsonObject.length()) {
     jsonObject.toCharArray(packet, simBuffer);
@@ -243,7 +271,8 @@ void simIsProcessed(void) {
     runningSwitching = true;
 
     #if debugMode
-    Serial.print("json: " + (String)packet + "\n");
+    /*
+    Serial.print("json:- " + (String)packet + "\n");
     Serial.print("a.lmp: " + (String)a.lmp + " a.hon: " + (String)a.hon + " ");
     Serial.print("a.hof: " + (String)a.hof + " a.mon: " + (String)a.mon + " ");
     Serial.print("a.mof: " + (String)a.mof + "\n");
@@ -251,50 +280,28 @@ void simIsProcessed(void) {
     Serial.print("b.hof: " + (String)b.hof + " b.mon: " + (String)b.mon + " ");
     Serial.print("b.mof: " + (String)b.mof + "\n");
     Serial.print("hours: " + (String)t.hor + " minut: " + (String)t.min + "\n");
+    delay(3000);
+    */
     #endif
+
+    turningOnOffControl();
   }
 }
 
-void turningOnOffControl(void) {
-  if (runningSwitching) {
-    if (a.hon || a.hof || a.mon || a.mof) {
-      if (((a.hon * 60) + a.mon) < ((a.hof * 60) + a.mof)) {
-        digitalWrite(pinSwitchA, (((t.hor * 60) + t.min) > ((a.hon * 60) + a.mon) && \
-        ((t.hor * 60) + t.min) < ((a.hof * 60) + a.mof)) ? 1 : 0);
-      } else {
-        digitalWrite(pinSwitchA, (((t.hor * 60) + t.min) < ((a.hon * 60) + a.mon) && \
-        ((t.hor * 60) + t.min) > ((a.hof * 60) + a.mof)) ? 0 : 1);
-      }
-    }
-
-    if (b.hon || b.hof || b.mon || b.mof) {
-      if (((b.hon * 60) + b.mon) < ((b.hof * 60) + b.mof)) {
-        digitalWrite(pinSwitchB, (((t.hor * 60) + t.min) > ((b.hon * 60) + b.mon) && \
-        ((t.hor * 60) + t.min) < ((b.hof * 60) + b.mof)) ? 1 : 0);
-      } else {
-        digitalWrite(pinSwitchB, (((t.hor * 60) + t.min) < ((b.hon * 60) + b.mon) && \
-        ((t.hor * 60) + t.min) > ((b.hof * 60) + b.mof)) ? 0 : 1);
-      }
-    }
-  }
-}
-
-ISR(TIMER2_COMPA_vect) {
-  ledIndicator(statusIndicator);
-  turningOnOffControl();
-}
+// ISR(TIMER2_COMPA_vect) {
+//   ledIndicator(statusIndicator);
+//   turningOnOffControl();
+// }
 
 void setup(void) {
-  #if debugMode
+
   Serial.begin(baudrate);
-  #endif
 
   pinInitialize();
   simIsInitalize();
-  timerInitialize();
+  // timerInitialize();
 }
 
 void loop(void) {
   simIsProcessed();
-  delay(5000);
 }
